@@ -1,8 +1,10 @@
 ﻿#NoEnv  ; Recommended for performance and compatibility with future AutoHotkey releases.
 ; #Warn  ; Enable warnings to assist with detecting common errors.
+
 SendMode Input  ; Recommended for new scripts due to its superior speed and reliability.
 SetWorkingDir %A_ScriptDir%  ; Ensures a consistent starting directory.
 DetectHiddenWindows, on
+Menu, Tray, NoStandard ; remove standard Menu items
 
 class VerbosityLevelConfig {
     value := 0
@@ -13,6 +15,7 @@ class VerbosityLevelConfig {
         this.text := text
     }
 }
+global log := "vac-ks.log"
 
 global VERBOSITY_LEVEL := {}
 VERBOSITY_LEVEL.None     := 0
@@ -32,11 +35,13 @@ VERBOSITY_LEVEL_CONFIG[VERBOSITY_LEVEL.Critical] := new VerbosityLevelConfig(VER
 VERBOSITY_LEVEL_CONFIG[VERBOSITY_LEVEL.Debug] := new VerbosityLevelConfig(VERBOSITY_LEVEL.Debug, "DEBUG")
 VERBOSITY_LEVEL_CONFIG[VERBOSITY_LEVEL.All] := new VerbosityLevelConfig(VERBOSITY_LEVEL.All, "")
 
-global MessageBoxVerbosity := VERBOSITY_LEVEL.Debug
+global MessageBoxVerbosity := VERBOSITY_LEVEL.None
 MessageBoxVerbosity := MessageBoxVerbosity | VERBOSITY_LEVEL.Critical
 
-Log(level, message) {    
-    ;todo log to file
+Log(level, message) { 
+    FormatTime, timestamp, , % "yyyy-MM-dd HH:mm:ss"
+    text :=  timestamp . "`t" . VERBOSITY_LEVEL_CONFIG[level].text . "`t" . message . "`n"
+    FileAppend, % text, % log
     if (MessageBoxVerbosity >= VERBOSITY_LEVEL.All || MessageBoxVerbosity & level > 0) {
         MsgBox % VERBOSITY_LEVEL_CONFIG[level].text . ": " . message
     }
@@ -62,6 +67,10 @@ LogDebug(message) {
     Log(VERBOSITY_LEVEL.Debug, message)
 }
 
+LogImportant(message) {
+    Log(VERBOSITY_LEVEL.None, "`n`n" . message . "`n")
+}
+
 ;Switches virtual line output between 2 different external devices
 ;Uses KS (kernal streaming) audio repeater
 ;   Harder to configure
@@ -77,6 +86,7 @@ VAC_ICONS.default := {file: "mmres.dll", iconNum: 4}
 VAC_ICONS.speakers := {file: "speaker-white.ico"}
 VAC_ICONS.headphones := {file: "headset-white.ico"}
 VAC_ICONS.bluetooth := {file: "bluetooth-white.ico"}
+VAC_ICONS.hdmi := {file: "hdmi-white.ico"}
 
 ;probably won't have to change these
 global defaultSettings := {}
@@ -146,9 +156,9 @@ VAC.closeInstance        := new VACParam("CloseInstance", "string" )
 SetTrayIcon(options) {
     if (options.HasKey("file")) {
         if (options.HasKey("iconNum")) {        
-            Menu, Tray, Icon, % options.file, % options.iconNum
-        } else {
-            Menu, Tray, Icon, % options.file
+            Menu, tray, icon, % options.file, % options.iconNum
+        } else { 
+            Menu, tray, icon, % "icons\" . options.file
         }
     }
 }
@@ -156,14 +166,29 @@ SetTrayIcon(options) {
 ;sets the icon the default one
 SetTrayIcon(VAC_ICONS.default)
 
+class VACDevice {
+    name := ""
+    device := ""
+    isVolatile := false
+    
+    ;constructor
+    __New(name, device) {
+        this.name := name
+        this.device := device
+    }
+}
+
 ;class to store individual settings for each repeater started
 ;you can override default settings
 class VACRepeaterSettings {
+    outputDevice := {}
     output := ""
+    skip := false
     
     ;constructor
     __New(output) {
-        this.output := output
+        this.outputDevice := output
+        this.output := output.device
     }
     
     __Get(key) {
@@ -191,8 +216,12 @@ class ParamBuilder {
     }
 }    
 
+
+
 class VACRepeater {
-    winName := ""
+    devices := {}    
+    name := ""
+    winName := ""    
     input := ""
     settings := {}
     uid := -1
@@ -205,16 +234,23 @@ class VACRepeater {
     __New(winName, input, settings, updateTrayIcon) {
         this.winName := winName
         this.closeInstance := winName
-        this.input := input
+        this.input := input.device
         this.settings := settings
         this.updateTrayIcon := updateTrayIcon
+        this.devices.input := input 
+        this.devices.output := settings.outputDevice
+        this.name := this.devices.input.name . " -> " . this.devices.output.name
     }
     
     __Get(setting) {
         return this.settings[setting]
     }
     
-    Open() {
+    IsVolatile() {
+        return this.devices.input.isVolatile || this.devices.output.isVolatile
+    }
+    
+    Init() {
         if (this.startParams == "") {
             pb := new ParamBuilder(this)
             pb.Add("winName")
@@ -235,39 +271,62 @@ class VACRepeater {
             pb.Add("autoStart")
             this.startParams := pb.params
             pb := {}            
-        }        
-        if (!WinExist(this.winName)) {
-            LogInfo("Starting repeater with params: " . this.startParams)            
-            target := """" . appPath . """ " . this.startParams
-            Run, %target%, , % this.settings.winTarget, pid
-            this.pid := pid
-            WinWait, % this.winName, , 3
-            this.Pulse()
-        }
-    }
-        
-    Close() {
+        }    
         if (this.stopParams == "") {
             pb := new ParamBuilder(this)
             pb.Add("closeInstance")
             this.stopParams := pb.params
             pb := {}            
-        } 
+        }         
+    }
+        
+    Open() {
+        if (!WinExist(this.winName)) {
+            LogInfo("Starting repeater with params: " . this.startParams)            
+            target := """" . appPath . """ " . this.startParams
+            Run, %target%, , % this.settings.winTarget, pid
+            LogInfo("Repeater started: " . this.name)
+            this.pid := pid
+            WinWait, % this.winName, 1
+            if (WinExist("ahk_pid " . pid)) {
+                WinGetTitle, windowTitle
+                if (windowTitle == "Error") {
+                    ControlGetText, errorMessage, Static2, % "ahk_pid " . pid
+                    LogError("Unable to open " . this.name ": " . errorMessage)
+                    this.Kill()                    
+                } else {
+                    WinActivate
+                    WinHide
+                }
+            }
+        }
+    }
+        
+    Close() {
         if (WinExist(this.winName)) {
             LogInfo("Stopping repeater with params: " . this.stopParams)
             target := """" . appPath . """ " . this.stopParams
             Run, %target%, , Hide
+            LogInfo("Repeater stopped: " . this.name)
             WinWaitClose, , , 3
         }
+    }
+    
+    Kill() {
+        LogInfo("Repeater killed: " . this.name)
+        WinKill, % "ahk_pid " . this.pid    
+        SetTrayIcon(VAC_ICONS.default)
     }
     
     Start() {
         if (!WinExist(this.winName)) {
             this.Open()
         }
-        ControlClick, Start, % this.winName
-        if (this.updateTrayIcon) {
-            SetTrayIcon(this.settings.icon)
+        if (WinExist(this.winName)) {
+            ControlClick, Start, % this.winName
+            if (this.updateTrayIcon) {
+                SetTrayIcon(this.settings.icon)
+            }
         }
     }
     
@@ -288,31 +347,22 @@ class VACRepeater {
             WinActivate
             WinWaitActive, , , 3
         }
-    }        
+    }      
+
+    Show() {
+        if (!WinExist(this.winName)) {
+            this.Open()
+        }
+        if (WinExist(this.winName)) {
+            WinShow
+        }
+    }
     
     Hide() {
         if (WinExist(this.winName)) {
             WinHide
         }
-    }
-    
-    Pulse() {        
-        if (WinExist(this.winName)) {
-            WinActivate
-            ;WinWaitActive, , , 3
-            WinHide
-            ;WinWaitNotActive, , , 3
-        }
-    }
-    
-    Focus() {
-        if (WinExist(this.winName)) {
-            ControlFocus, Start
-            ControlFocus, Stop
-        }
-    }
-            
-        
+    }   
 }   
 
 class WrapAroundIndex {
@@ -342,6 +392,69 @@ class WrapAroundIndex {
     }
 }
 
+class VACRepeaterSet {
+    name := ""
+    output := {}
+    repeaters := {}
+    
+    __New(output, repeaters) {
+        this.output := output
+        Loop % repeaters.Length() {
+            repeater := repeaters[A_Index]
+            this.repeaters.Push(repeater)
+            this.name .= repeater.devices.input.Name
+            if (A_index != repeaters.Length()) {
+                this.name .= "/"
+            }
+        }
+        this.name .= " -> " . output.name
+    }  
+    
+    MaintainSet(op, isCurrentSet := false) {
+        menuOp := ""
+        Loop % this.repeaters.Length() {
+            repeater := this.repeaters[A_Index]
+            if (op == "open") {
+                repeater.Open()
+            } else if (op == "close") {
+                repeater.Close()
+                menuOp := "stop"
+            } else if (op == "kill") {
+                repeater.Kill()
+                menuOp := "stop"
+            } else if (op == "activate") {
+                repeater.activate()
+            } else if (op == "start") {
+                repeater.Start()
+                menuOp := "start"
+            } else if (op == "stop") {
+                repeater.Stop()
+                menuOp := "stop"
+            } else if (op == "restart") {
+                repeater.Restart()
+                menuOp := "start"
+            } else if (op == "startup") {
+                repeater.Init()
+                if (!repeater.isVolatile()) {
+                    if (isCurrentSet) {
+                        repeater.Start()
+                        menuOp := "start"
+                    } else {
+                        repeater.Open()
+                    }
+                } else {
+                    LogInfo("Not starting " . this.name . ": volatile device")
+                }
+            }
+        }    
+        if (menuOp == "start") {
+            Menu, tray, Check, % this.name
+        } else if (menuOp == "stop") {
+            Menu, tray, UnCheck, % this.name
+        }
+    }
+}
+
 ;Class that defines the switchers used 
 ;you can define a 1->1 repeater, and also setting it to persistent
 class VACSwitcher {    
@@ -355,6 +468,7 @@ class VACSwitcher {
     repeaterSets := {}
     setIndex := {}
     paused := false
+    isSwitchable := false
     
     __New(name) {
         this.name := name
@@ -363,14 +477,16 @@ class VACSwitcher {
     Init() {        
         if (this.inputs.Length() > 0 && this.outputs.Length() > 0) {         
             Loop % this.outputs.Length() {
+                this.isSwitchable |= !this.outputs[outputIndex].skip
                 outputIndex := A_Index
-                set := {}
+                repeaters := {}
                 Loop % this.inputs.Length() {
                     inputIndex := A_Index
                     winName := "VAC (" . this.name . "): Input " . inputIndex . " - Output " . outputIndex
                     repeater := new VACRepeater(winName, this.inputs[inputIndex], this.outputs[outputIndex], this.updateTrayIcon)
-                    set.Push(repeater)
+                    repeaters.Push(repeater)
                 }
+                set := new VACRepeaterSet(this.outputs[outputIndex].outputDevice, repeaters)                
                 this.repeaterSets.Push(set)
             }
         }
@@ -379,30 +495,17 @@ class VACSwitcher {
     
     MaintainAllSets(op) {
         Loop % this.repeaterSets.Length() {
-            set := this.repeaterSets[A_Index]
-            Loop % set.Length() {
-                repeater := set[A_Index]
-                if (op == "open") {
-                    repeater.Open()
-                } else if (op == "close") {
-                    repeater.Close()
-                } else if (op == "activate") {
-                    repeater.activate()
-                }
-            }
+            this.repeaterSets[A_Index].MaintainSet(op)
         }
     }
+    
     MaintainCurrentSet(op) {
-        set := this.repeaterSets[this.setIndex.index]
-        Loop % set.Length() {
-            repeater := set[A_Index]
-            if (op == "start") {
-                repeater.Start()
-            } else if (op == "stop") {
-                repeater.Stop()
-            } else if (op == "restart") {
-                repeater.Restart()
-            } 
+        this.repeaterSets[this.setIndex.index].MaintainSet(op)
+    }
+    
+    Startup() {
+        Loop % this.repeaterSets.Length() {
+            this.repeaterSets[A_Index].MaintainSet("startup", A_Index == this.setIndex.index)
         }
     }
     
@@ -414,8 +517,13 @@ class VACSwitcher {
         this.MaintainAllSets("close")
     }
     
+    Kill() {
+        this.MaintainAllSets("kill")
+    }
+    
     Start() {
         this.MaintainCurrentSet("start")
+        this.paused := false
     }
     
     Stop() {
@@ -427,14 +535,17 @@ class VACSwitcher {
         this.Start()
     }
     
+    Activate() {
+        this.MaintainAllSets("activate")
+    }
+    
     Pause() { 
         this.paused := true
         this.Stop()
     }
     
     Resume() {
-        this.Start()
-        this.paused := false
+        this.Start()        
     }
     
     Switch(inc) {
@@ -442,15 +553,26 @@ class VACSwitcher {
             this.Resume()
         } else if (!this.persistent) {
             this.Stop()
-            this.setIndex.Increment(inc)
+            if (this.isSwitchable) {
+                Loop {       
+                    this.setIndex.Increment(inc)
+                    repeater := this.repeaterSets[this.setIndex.index].repeaters[1]
+                } until (!repeater.skip)                
+            } else {
+                this.setIndex.Increment(inc)
+            }
             this.Start()
         } else {            
             this.Start()
         }
     }
     
-    Activate() {
-        this.MaintainAllSets("activate")
+    SwitchTo(index) {
+        if (!this.persistent) {
+            this.Stop()
+            this.setIndex.SetIndex(index) 
+            this.Start()
+        }
     }
 }
 
@@ -460,56 +582,73 @@ class VACSwitcher {
 ;stores the repeater setups
 global switchers := {}
 
-;Default Device -> Switching Repeater
-;For me i need this so i can use dxtory to seperate out audio streams
-switcher := new VACSwitcher("Default Device")
-switcher.persistent := true
-switcher.inputs.Push("Virtual Cable 1")
-output := new VACRepeaterSettings("Virtual Cable 3")
-output.totalBuffer := 70
-switcher.outputs.Push(output)
-switchers.Push(switcher)
+LoadConfig() {
+    LogInfo("LoadConfig - Begin")
+    ;Default Device -> Switching Repeater
+    ;For me i need this so i can use dxtory to seperate out audio streams
+    switcher := new VACSwitcher("Default Device")
+    switcher.persistent := true
+    device := new VACDevice("Default Device", "Virtual Cable 1")
+    switcher.inputs.Push(device)
+    device := new VACDevice("Mixer", "Virtual Cable 3")
+    settings := new VACRepeaterSettings(device)
+    settings.totalBuffer := 70
+    switcher.outputs.Push(settings)
+    switchers.Push(switcher)
 
-;Default comm device -> Switching repeater
-;need this to capture VOIP stream seperately
-switcher := new VACSwitcher("Default Comm")
-switcher.persistent := true
-switcher.inputs.Push("Virtual Cable 2")
-output := new VACRepeaterSettings("Virtual Cable 3")
-output.totalBuffer := 70
-switcher.outputs.Push(output)
-switchers.Push(switcher)
+    ;Default comm device -> Switching repeater
+    ;need this to capture VOIP stream seperately
+    switcher := new VACSwitcher("Default Comm")
+    switcher.persistent := true
+    device := new VACDevice("Default Comm", "Virtual Cable 2")
+    switcher.inputs.Push(device)
+    device := new VACDevice("Mixer", "Virtual Cable 3")
+    settings := new VACRepeaterSettings(device)
+    settings.totalBuffer := 70
+    switcher.outputs.Push(settings)
+    switchers.Push(switcher)
 
-;;;START MIXER
-;outputs the streams to the correct external output device
-switcher := new VACSwitcher("Mixer")
-switcher.updateTrayIcon := true
-switcher.inputs.Push("Virtual Cable 3")
+    ;;;START MIXER
 
-;speakers
-output := new VACRepeaterSettings("Realtek HD Audio output")
-output.totalBuffer := 20
-output.icon := VAC_ICONS.speakers
-switcher.outputs.Push(output)
+    ;outputs the streams to the correct external output device
+    switcher := new VACSwitcher("Mixer")
+    switcher.updateTrayIcon := true
+    device := new VACDevice("Mixer", "Virtual Cable 3")
+    switcher.inputs.Push(device)
 
-;headphones
-;output := new VACRepeaterSettings("USB Audio Device") ;usb
-output := new VACRepeaterSettings("Realtek HDA SPDIF Optical Out") ;optical
-output.icon := VAC_ICONS.headphones
-switcher.outputs.Push(output)
-switchers.Push(switcher)
+    ;speakers
+    device := new VACDevice("Speakers", "Sound Blaster Speaker/Headphone")
+    settings := new VACRepeaterSettings(device)
+    settings.icon := VAC_ICONS.speakers
+    switcher.outputs.Push(settings)
 
-;Bluetooth speakers
-output := new VACRepeaterSettings("Unknown")
-output.totalBuffer := 20
-output.samplingRate := 44100
-output.icon := VAC_ICONS.bluetooth
-switcher.outputs.Push(output)
-;;;END Mixer
+    ;headphones
+    device := new VACDevice("Headphones", "Sound Blaster SPDIF-Out")
+    settings := new VACRepeaterSettings(device)
+    settings.icon := VAC_ICONS.headphones
+    switcher.outputs.Push(settings)
 
-if (switchers.Length() == 0) {
-    LogCritical("No switchers defined!")
-    ExitApp 1
+    ;hdmi
+    device := new VACDevice("HDMI", "Unknown")
+    device.isVolatile := true
+    settings := new VACRepeaterSettings(device)
+    settings.icon := VAC_ICONS.hdmi
+    settings.skip := true
+    switcher.outputs.Push(settings)
+
+    ;Bluetooth speakers
+    device := new VACDevice("Bluetooth", "Unknown")
+    device.isVolatile := true
+    settings := new VACRepeaterSettings(device)
+    settings.totalBuffer := 20
+    settings.samplingRate := 44100
+    settings.icon := VAC_ICONS.bluetooth
+    settings.skip := true
+    ;switcher.outputs.Push(settings)
+
+    switchers.Push(switcher)
+    ;;;END Mixer
+    LogInfo("LoadConfig - End")
 }
 
 MaintainSwitchers(op, inc) {
@@ -533,27 +672,118 @@ MaintainSwitchers(op, inc) {
             switcher.Open()
         } else if (op == "close") {
             switcher.Close()
+        } else if (op == "kill") {
+            switcher.kill()
         } else if (op == "activate") {
             switcher.Activate()
+        } else if (op == "startup") {
+            switcher.Startup()
         }
     }
 }
 
-MaintainSwitchers("init", 0)
-MaintainSwitchers("open", 0)
-;MaintainSwitchers("activate", 0)
-MaintainSwitchers("start", 0)
+MenuHandler(itemName, itemPos, menuName) {
+    if (menuName == "ShowMenu") {
+        Loop % switchers.Length() {
+            switcher := switchers[A_Index]
+            Loop % switcher.repeaterSets.Length() {
+                repeaters := switcher.repeaterSets[A_Index].repeaters
+                Loop % repeaters.Length() {
+                    repeater := repeaters[A_Index]
+                    if (repeater.name == itemName) {
+                        repeater.Show()
+                    }
+                }
+            }
+        }
+    } else {
+        if (itemName == "Start") {
+            MaintainSwitchers("resume", 0)
+        } else if (itemName == "Stop") {
+            MaintainSwitchers("pause", 0)
+        } else if (itemName == "Exit") {
+            MaintainSwitchers("kill", 0)
+            ExitApp 0
+        } else {            
+            Loop % switchers.Length() {
+                switcher := switchers[A_Index]
+                Loop % switcher.repeaterSets.Length() {
+                    set := switcher.repeaterSets[A_Index]
+                    if (set.name == itemName) {
+                        if (switcher.persistent) {
+                            switcher.Start()
+                        } else {
+                            switcher.switchTo(A_Index)
+                        }
+                    }
+                }                    
+            }
+        }
+    }
+}
+
+BuildTrayMenu() {
+    LogInfo("BuildingTrayMenu - Begin")
+    MaintainSwitchers("init", 0)
+    Loop % switchers.Length() {
+        switcherIndex := A_Index
+        switcher := switchers[switcherIndex]
+        
+        Loop % switcher.repeaterSets.Length() {        
+            setIndex := A_index
+            set := switcher.repeaterSets[setIndex]
+            Loop % set.repeaters.Length() {
+                repeater := set.repeaters[A_Index]
+                Menu, ShowMenu, add, % repeater.name, MenuHandler
+            }       
+            if (switcher.persistent) {
+                Menu, tray, add, % set.name, MenuHandler, +Radio    
+            } else {
+                Menu, tray, add, % set.name, MenuHandler, +Radio
+            }
+        }    
+        if (switcherIndex != switchers.Length()) {
+            Menu, ShowMenu, add
+        }
+        Menu, tray, add
+    }
+    Menu, tray, add, Show, :ShowMenu
+    Menu, tray, add
+    Menu, tray, add, Start, MenuHandler
+    Menu, tray, add, Stop, MenuHandler
+    Menu, tray, add
+    Menu, tray, add, Exit, MenuHandler    
+    LogInfo("BuildingTrayMenu - End")
+}
+
+StartApp() {
+    LogImportant("`tAPPLICATION START")
+    OnExit("ShutdownApp")
+    LoadConfig()
+    if (switchers.Length() == 0) {
+        LogCritical("No switchers defined!")
+        ExitApp 1
+    }
+    BuildTrayMenu()
+    MaintainSwitchers("startup", 0)
+}
+
+ShutdownApp() {
+    LogImportant("`tAPPLICATION SHUTDOWN")
+}
+
+StartApp()
 
 ;ctrl+shift+F12
-^+F12::
-    MaintainSwitchers("pause", 0)
-return 
+;^+F12::
+;    MaintainSwitchers("pause", 0)
+;return 
 
 ;ctrl+shift+alt+F12
-^+!F12::
-    MaintainSwitchers("close", 0)
-    ExitApp 0
-return
+;^+!F12::
+;    MaintainSwitchers("close", 0)
+;    ExitApp 0
+;return
 
 ;ctrl+F12
 ^F12::
