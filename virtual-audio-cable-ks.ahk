@@ -349,8 +349,8 @@ class VACRepeater {
         }
     }      
 
-    Show() {
-        if (!WinExist(this.winName)) {
+    Show(startIfNotExist := false) {
+        if (startIfNotExist && !WinExist(this.winName)) {
             this.Open()
         }
         if (WinExist(this.winName)) {
@@ -690,7 +690,7 @@ MenuHandler(itemName, itemPos, menuName) {
                 repeaters := switcher.repeaterSets[A_Index].repeaters
                 Loop % repeaters.Length() {
                     repeater := repeaters[A_Index]
-                    if (repeater.name == itemName) {
+                    if (repeater.name == itemName || itemName == "All") {
                         repeater.Show()
                     }
                 }
@@ -747,6 +747,8 @@ BuildTrayMenu() {
         }
         Menu, tray, add
     }
+    Menu, ShowMenu, add
+    Menu, ShowMenu, add, All, MenuHandler
     Menu, tray, add, Show, :ShowMenu
     Menu, tray, add
     Menu, tray, add, Start, MenuHandler
